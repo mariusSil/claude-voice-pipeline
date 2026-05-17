@@ -18,10 +18,12 @@ LOCKDIR="$QUEUE_DIR/daemon.lock"
 PIDFILE="$QUEUE_DIR/daemon.pid"
 SESSION_ID=$(basename "$QUEUE_DIR")
 
-DEFAULT_VOICE="nova"
-MODEL_EN="tts-1"
+DEFAULT_VOICE="onyx"
+MODEL_EN="tts-1-hd"
 MODEL_LT="gpt-4o-mini-tts"
-LT_INSTRUCTIONS="Speak in natural, fluent Lithuanian (lietuvių kalba). The text is Lithuanian, NOT Latvian, NOT Polish. Use authentic Lithuanian phonetics — soft consonants, clear vowels, melodic stress."
+EN_SPEED="1.35"
+LT_INSTRUCTIONS="Speak in natural, fluent Lithuanian (lietuvių kalba). The text is Lithuanian, NOT Latvian, NOT Polish. Voice: deep, calm, masculine, confident, decisive. Pace: quick and energetic, faster than default, brisk. Tone: matter-of-fact, like a senior engineer giving a status update."
+PLAYBACK_VOLUME="0.7"
 
 # Write our PID for the kill-on-new-prompt hook.
 echo $$ > "$PIDFILE"
@@ -79,8 +81,9 @@ print(json.dumps({
     'model': sys.argv[1],
     'voice': sys.argv[2],
     'input': sys.argv[3],
+    'speed': float(sys.argv[4]),
 }))
-" "$MODEL_EN" "$voice" "$text")
+" "$MODEL_EN" "$voice" "$text" "$EN_SPEED")
   fi
   # User-Agent embeds session id so UserPromptSubmit can pkill -f us by session
   # even if process tree walking misses orphan grandchildren.
@@ -128,7 +131,7 @@ while true; do
 
     wait "$PID" 2>/dev/null
     if [ -s "$AUDIO" ] && file "$AUDIO" 2>/dev/null | grep -q 'MPEG\|Audio'; then
-      afplay "$AUDIO" 2>/dev/null
+      afplay -v "$PLAYBACK_VOLUME" "$AUDIO" 2>/dev/null
     fi
     rm -f "$AUDIO"
   done
