@@ -1,0 +1,43 @@
+#!/bin/bash
+# Global say queue entry point. Usage: claude-say "text" [voice] [session_id]
+# - Auto-detects language from text if voice not given (LT diacritics → lt-LT-OnaNeural, else en-US-MichelleNeural).
+# - Per-session queue: prevents voice from one Claude window leaking into another.
+#   Session ID comes from arg 3, env $CLAUDE_SESSION_ID, or "default".
+
+TEXT="$1"
+VOICE="$2"
+SESSION="${3:-${CLAUDE_SESSION_ID:-default}}"
+
+[ -z "$TEXT" ] && exit 0
+
+# Language autodetect
+if [ -z "$VOICE" ]; then
+  if printf '%s' "$TEXT" | LC_ALL=en_US.UTF-8 grep -qE '[ąčęėįšųūžĄČĘĖĮŠŲŪŽ]'; then
+    VOICE="lt-LT-OnaNeural"
+  else
+    VOICE="en-US-MichelleNeural"
+  fi
+fi
+
+QUEUE_ROOT="/tmp/claude-say-queue"
+QUEUE_DIR="$QUEUE_ROOT/$SESSION"
+MESSAGES_DIR="$QUEUE_DIR/messages"
+LOCKDIR="$QUEUE_DIR/daemon.lock"
+
+mkdir -p "$MESSAGES_DIR"
+
+# Enqueue: timestamp in filename for ordering, voice in filename
+TS=$(python3 -c 'import time; print(int(time.time()*1000000))')
+printf '%s' "$TEXT" > "$MESSAGES_DIR/${TS}_${VOICE}.msg"
+
+# Start daemon for this session if not already running
+if [ -d "$LOCKDIR" ]; then
+  age=$(($(date +%s) - $(stat -f %m "$LOCKDIR" 2>/dev/null || echo 0)))
+  [ "$age" -gt 15 ] && rm -rf "$LOCKDIR"
+fi
+
+if mkdir "$LOCKDIR" 2>/dev/null; then
+  ( bash ~/.claude/voice-pipeline/claude-say-daemon.sh "$QUEUE_DIR" </dev/null >/dev/null 2>&1 & )
+fi
+
+exit 0
