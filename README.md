@@ -1,8 +1,8 @@
 # Claude Code Voice Pipeline
 
-Hands-free voice narration for [Claude Code](https://claude.com/claude-code). Reads two short sentences per turn out loud — what the agent is about to do, and what it accomplished — with automatic Lithuanian/English voice selection via Microsoft Azure neural voices (edge-tts).
+Hands-free voice narration for [Claude Code](https://claude.com/claude-code). Reads two short sentences per turn out loud — what the agent is about to do, and what it accomplished — via OpenAI TTS (`tts-1`, voice `nova`) with API key in macOS Keychain.
 
-Designed as a **voice extension of the agent itself**: the agent writes the sentences in whatever language the user is speaking; the TTS layer picks the right neural voice based on the text.
+Designed as a **voice extension of the agent itself**: the agent writes the sentences in whatever language the user is speaking (Lithuanian or English). One multilingual voice handles both — no language switching, no accent mismatch.
 
 ---
 
@@ -29,9 +29,10 @@ For `AskUserQuestion` interactions, the question and all option labels are read 
               ▼
 ┌──────────────────────────────────────────────────────┐
 │  UserPromptSubmit  →  userpromptsubmit-hook.sh       │
+│    • HARD CUT: kills prior-turn daemon + children    │
+│      (curl mid-request, afplay mid-playback)         │
+│    • clears per-turn flag, sweeps stale state        │
 │    • injects voice rules into agent context          │
-│    • clears per-turn flag + sweeps stale state       │
-│    • drops unspoken sentences from previous turn     │
 ├──────────────────────────────────────────────────────┤
 │  PostToolUse       →  speak-plan-postuse.sh          │
 │    • on first tool call: speaks the agent's plan     │
@@ -44,8 +45,7 @@ For `AskUserQuestion` interactions, the question and all option labels are read 
               │ all 3 hooks call:
               ▼
 ┌──────────────────────────────────────────────────────┐
-│  claude-say "text" [voice] [session_id]              │
-│    • autodetects LT (ąčęėįšųūž) vs EN                │
+│  claude-say "text" [voice_override] [session_id]     │
 │    • enqueues into per-session queue dir             │
 │    • spawns daemon if not running                    │
 └─────────────┬────────────────────────────────────────┘
@@ -53,45 +53,61 @@ For `AskUserQuestion` interactions, the question and all option labels are read 
               ▼
 ┌──────────────────────────────────────────────────────┐
 │  claude-say-daemon.sh                                │
+│    • writes own PID to daemon.pid (kill target)      │
+│    • reads API key from macOS Keychain               │
 │    • parallel synthesis of ALL queued messages       │
 │    • sequential playback in arrival order            │
 │    • while sentence N plays, N+1, N+2... pre-render  │
+│    • trap on SIGTERM cleans up on hard-kill          │
 │    • exits when queue drains                         │
 └──────────────────────────────────────────────────────┘
               │
               ▼
-        edge-tts → MP3 → afplay
+        OpenAI /v1/audio/speech (tts-1, nova) → MP3 → afplay
 ```
 
 **Why a per-session queue?** Multiple Claude Code windows can run simultaneously. Each gets its own queue dir (`/tmp/claude-say-queue/<session_id>/`) so voices from different sessions never interleave.
 
-**Why parallel pre-synthesis?** edge-tts has 0.5–1.5s roundtrip per sentence. If we synthesized one at a time, you'd hear a long gap between plan and DONE: lines. By kicking off synthesis for every queued message in parallel and playing in order, the daemon hides almost all latency.
+**Why parallel pre-synthesis?** OpenAI TTS has ~0.5–1.5s roundtrip per sentence. If we synthesized one at a time, you'd hear a long gap between plan and DONE: lines. By kicking off synthesis for every queued message in parallel and playing in order, the daemon hides almost all latency.
+
+**Why hard-cut on new prompt?** Without it, the prior turn's DONE: sentence can keep playing while the user is already typing the next task — confusing. `UserPromptSubmit` reads the daemon's PID from `daemon.pid`, kills its children (in-flight `curl` or `afplay`), then kills the daemon itself. Mid-word truncation is a small price for clean turn boundaries.
 
 ---
 
 ## Setup
 
-### 1. Install dependencies
+### 1. Dependencies
+
+Just `curl`, `python3`, `afplay`, `security` — all on macOS by default. No `pip install`, no `npm install`.
+
+### 2. Store your OpenAI API key in Keychain
+
+Get an API key from <https://platform.openai.com/api-keys>, then:
 
 ```bash
-# edge-tts (Python package — Microsoft Azure neural voices via free public endpoint)
-pip3 install edge-tts
-
-# Verify it works
-edge-tts --voice en-US-MichelleNeural --text "Hello" --write-media /tmp/test.mp3
-afplay /tmp/test.mp3
+security add-generic-password \
+  -a "$USER" \
+  -s "claude-voice-openai-api-key" \
+  -w "sk-proj-YOUR_KEY_HERE" \
+  -U
 ```
 
-`afplay` and `say` come with macOS. No other dependencies.
+Verify it stored correctly:
 
-### 2. Clone into `~/.claude/voice-pipeline/`
+```bash
+security find-generic-password -s "claude-voice-openai-api-key" -w
+```
+
+The key never lives on disk in plaintext — only in macOS Keychain (encrypted at rest).
+
+### 3. Clone into `~/.claude/voice-pipeline/`
 
 ```bash
 git clone git@github.com:<your-user>/claude-voice-pipeline.git ~/.claude/voice-pipeline
 chmod +x ~/.claude/voice-pipeline/*.sh ~/.claude/voice-pipeline/claude-say
 ```
 
-### 3. Wire the hooks in `~/.claude/settings.json`
+### 4. Wire the hooks in `~/.claude/settings.json`
 
 Add this `hooks` block (merge with whatever you already have):
 
@@ -111,7 +127,7 @@ Add this `hooks` block (merge with whatever you already have):
 }
 ```
 
-### 4. Restart Claude Code
+### 5. Restart Claude Code
 
 Open a new session — on the first prompt, the agent should now narrate.
 
@@ -119,21 +135,23 @@ Open a new session — on the first prompt, the agent should now narrate.
 
 ## Configuration
 
-### Change voice
+### Change voice or model
 
-Default: `en-US-MichelleNeural` (English) / `lt-LT-OnaNeural` (Lithuanian).
-
-To swap defaults, edit `claude-say` lines 16–22:
+Edit the two constants at the top of `claude-say-daemon.sh`:
 
 ```bash
-if printf '%s' "$TEXT" | LC_ALL=en_US.UTF-8 grep -qE '[ąčęėįšųūžĄČĘĖĮŠŲŪŽ]'; then
-  VOICE="lt-LT-LeonasNeural"        # male LT
-else
-  VOICE="en-US-AvaMultilingualNeural" # warm female, also speaks LT
-fi
+DEFAULT_VOICE="nova"   # or: shimmer, alloy, echo, fable, onyx
+MODEL="tts-1"          # or: tts-1-hd (higher quality, 2x cost)
 ```
 
-Browse all voices: `edge-tts --list-voices`. Multilingual variants (`*MultilingualNeural`) handle mixed LT/EN gracefully — recommended if you mix languages often.
+OpenAI voice characteristics:
+- `nova` — warm, friendly female (default). Best balance for LT/EN mixed.
+- `shimmer` — energetic, younger female.
+- `alloy` — neutral, cleanest accent. Slightly robotic.
+- `onyx` — calm, authoritative male baritone.
+- `echo` / `fable` — alternates if you prefer different timbre.
+
+All voices handle mixed Lithuanian + English in one sentence without language switching. LT pronunciation has a faint American accent — acceptable for short narration sentences.
 
 ### Change voice rules / sentence style
 
@@ -141,36 +159,23 @@ The agent's instructions live in `userpromptsubmit-hook.sh` — the `additionalC
 
 ### Disable temporarily
 
-Comment out the hook entries in `settings.json` and restart Claude Code. Or just `pkill -f claude-say-daemon` to silence whatever's currently queued.
-
----
-
-## How language autodetect works
-
-`claude-say` greps the text for any Lithuanian diacritic (`ą č ę ė į š ų ū ž` + uppercase). Match → routes to `lt-LT-OnaNeural`. No match → `en-US-MichelleNeural`.
-
-This means:
-- LT text **without diacritics** ("aciu uz pagalba") will be misrouted to EN. Don't write LT without diacritics — beyond ugliness, it breaks the voice.
-- Mixed sentences ("DONE: deploy'inau į Vercel") route to LT (because of "į"). Lithuanian voice will try to pronounce "Vercel" with Lithuanian phonetics. Acceptable but not perfect. Multilingual voices solve this — see Configuration.
+Comment out the hook entries in `settings.json` and restart Claude Code. Or run `pkill -f claude-say-daemon` to silence whatever's currently queued in the current session.
 
 ---
 
 ## Troubleshooting
 
 **Nothing speaks.**
-1. Verify edge-tts: `edge-tts --voice en-US-MichelleNeural --text "test" --write-media /tmp/t.mp3 && afplay /tmp/t.mp3`
-2. Check hooks are wired: `python3 -c "import json; print(json.load(open('$HOME/.claude/settings.json'))['hooks'].keys())"`
-3. Check the queue: `ls /tmp/claude-say-queue/*/messages/` — should be empty between turns.
-4. Manually fire: `bash ~/.claude/voice-pipeline/claude-say "test" "" debugsession`
+1. Verify Keychain key: `security find-generic-password -s "claude-voice-openai-api-key" -w` (should print your key)
+2. Verify OpenAI TTS works: `KEY=$(security find-generic-password -s "claude-voice-openai-api-key" -w) && curl -X POST https://api.openai.com/v1/audio/speech -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" -d '{"model":"tts-1","voice":"nova","input":"test"}' -o /tmp/t.mp3 && afplay /tmp/t.mp3`
+3. Check hooks are wired: `python3 -c "import json; print(list(json.load(open('$HOME/.claude/settings.json'))['hooks'].keys()))"`
+4. Manually fire: `bash ~/.claude/voice-pipeline/claude-say "test sentence" "" debugsession`
 
 **Voice arrives way too late.**
-The daemon already does parallel pre-synthesis. Remaining latency is edge-tts API roundtrip + the fact that the DONE: hook fires only after the agent's full response is done. If your turns are long, the DONE: arrives only after all tools/text complete — that's by design (it's a *summary*, not a running commentary).
+The daemon already does parallel pre-synthesis. Remaining latency is the OpenAI API roundtrip (~0.5–1.5s) + the fact that the DONE: hook fires only after the agent's full response is done. If your turns are long, the DONE: arrives only after all tools/text complete — that's by design (it's a *summary*, not a running commentary).
 
 **Voice from previous turn plays after I send a new prompt.**
-`userpromptsubmit-hook.sh` drops unspoken queued sentences from the previous turn. But the daemon will finish whatever sentence it's currently mid-synthesis on — that one can't be killed cleanly. Max overlap is the duration of one sentence (~3–5s).
-
-**Lithuanian text pronounced with English voice (or vice versa).**
-Check that LT diacritics are present. The detector only triggers on `ąčęėįšųūž` — without them, it falls back to EN.
+`UserPromptSubmit` reads `daemon.pid` and kills the daemon plus its children (in-flight `curl` and `afplay`). If you still hear bleed-through, check that the PID file is being written: `ls /tmp/claude-say-queue/<session>/daemon.pid`.
 
 **Multiple Claude sessions narrate over each other.**
 They shouldn't — each session gets its own queue dir. If it's happening, check that `session_id` is being passed correctly: `ls /tmp/claude-say-queue/` should show one dir per active session.
@@ -201,7 +206,8 @@ The next `claude-say` call will respawn a fresh daemon.
 
 ## Caveats / known limitations
 
-- **macOS only** (`afplay`, `say`). Linux port would need `mpg123`/`paplay` and a different fallback.
-- **edge-tts uses a free Microsoft endpoint** — no API key, but rate-limited. Heavy use may hit throttling.
+- **macOS only** (`afplay`, `security` for Keychain). Linux port would need an alternate audio player and key store (`secret-tool`/libsecret).
+- **OpenAI dependency** — sentences are sent to OpenAI's API. OpenAI's privacy policy applies (they don't train on API data by default, and offer a DPA for enterprise). Don't enable this pipeline if your conversation sentences cannot leave your machine.
+- **Cost** — `tts-1` is $15/1M characters. Plan + DONE: sentences average ~50 chars each, so ~$0.0015 per Claude turn. A heavy day of 200 turns ≈ $0.30.
 - **No streaming** — each sentence is synthesized to a full MP3 before playback starts. ~0.5s minimum latency per sentence.
-- **macOS `say` fallback** only fires for English voices. If edge-tts is down and you're in a LT session, you'll get silence rather than mangled Lithuanian from Samantha.
+- **Lithuanian accent** — OpenAI's TTS speaks Lithuanian with a faint American accent. Fine for short narration; not suitable for long-form content.

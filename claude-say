@@ -1,23 +1,13 @@
 #!/bin/bash
-# Global say queue entry point. Usage: claude-say "text" [voice] [session_id]
-# - Auto-detects language from text if voice not given (LT diacritics → lt-LT-OnaNeural, else en-US-MichelleNeural).
-# - Per-session queue: prevents voice from one Claude window leaking into another.
-#   Session ID comes from arg 3, env $CLAUDE_SESSION_ID, or "default".
+# Global say queue entry point. Usage: claude-say "text" [voice_override] [session_id]
+# Per-session queue prevents voice from one Claude window leaking into another.
+# Voice routing is handled by the daemon (single multilingual voice handles LT + EN).
 
 TEXT="$1"
-VOICE="$2"
+VOICE_OVERRIDE="$2"
 SESSION="${3:-${CLAUDE_SESSION_ID:-default}}"
 
 [ -z "$TEXT" ] && exit 0
-
-# Language autodetect
-if [ -z "$VOICE" ]; then
-  if printf '%s' "$TEXT" | LC_ALL=en_US.UTF-8 grep -qE '[ąčęėįšųūžĄČĘĖĮŠŲŪŽ]'; then
-    VOICE="lt-LT-OnaNeural"
-  else
-    VOICE="en-US-MichelleNeural"
-  fi
-fi
 
 QUEUE_ROOT="/tmp/claude-say-queue"
 QUEUE_DIR="$QUEUE_ROOT/$SESSION"
@@ -26,11 +16,11 @@ LOCKDIR="$QUEUE_DIR/daemon.lock"
 
 mkdir -p "$MESSAGES_DIR"
 
-# Enqueue: timestamp in filename for ordering, voice in filename
+# Filename: <microsecond_ts>__<voice_override_or_empty>.msg
 TS=$(python3 -c 'import time; print(int(time.time()*1000000))')
-printf '%s' "$TEXT" > "$MESSAGES_DIR/${TS}_${VOICE}.msg"
+printf '%s' "$TEXT" > "$MESSAGES_DIR/${TS}__${VOICE_OVERRIDE}.msg"
 
-# Start daemon for this session if not already running
+# Start daemon for this session if not already running.
 if [ -d "$LOCKDIR" ]; then
   age=$(($(date +%s) - $(stat -f %m "$LOCKDIR" 2>/dev/null || echo 0)))
   [ "$age" -gt 15 ] && rm -rf "$LOCKDIR"
