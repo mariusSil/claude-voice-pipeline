@@ -1,6 +1,6 @@
 # Claude Code Voice Pipeline
 
-Hands-free voice narration for [Claude Code](https://claude.com/claude-code). Reads two short sentences per turn out loud — what the agent is about to do, and what it accomplished — via OpenAI TTS (`tts-1`, voice `nova`) with API key in macOS Keychain.
+Hands-free voice narration for [Claude Code](https://claude.com/claude-code). Reads two short sentences per turn out loud — what the agent is about to do, and what it accomplished — via ElevenLabs TTS (`eleven_flash_v2_5`, voice `Adam` by default) with API key in macOS Keychain.
 
 Designed as a **voice extension of the agent itself**: the agent writes the sentences in whatever language the user is speaking (Lithuanian or English). One multilingual voice handles both — no language switching, no accent mismatch.
 
@@ -80,22 +80,22 @@ For `AskUserQuestion` interactions, the question and all option labels are read 
 
 Just `curl`, `python3`, `afplay`, `security` — all on macOS by default. No `pip install`, no `npm install`.
 
-### 2. Store your OpenAI API key in Keychain
+### 2. Store your ElevenLabs API key in Keychain
 
-Get an API key from <https://platform.openai.com/api-keys>, then:
+Get an API key from <https://elevenlabs.io/app/settings/api-keys>, then:
 
 ```bash
 security add-generic-password \
   -a "$USER" \
-  -s "claude-voice-openai-api-key" \
-  -w "sk-proj-YOUR_KEY_HERE" \
+  -s "claude-voice-elevenlabs-api-key" \
+  -w "sk_YOUR_KEY_HERE" \
   -U
 ```
 
 Verify it stored correctly:
 
 ```bash
-security find-generic-password -s "claude-voice-openai-api-key" -w
+security find-generic-password -s "claude-voice-elevenlabs-api-key" -w
 ```
 
 The key never lives on disk in plaintext — only in macOS Keychain (encrypted at rest).
@@ -137,21 +137,33 @@ Open a new session — on the first prompt, the agent should now narrate.
 
 ### Change voice or model
 
-Edit the two constants at the top of `claude-say-daemon.sh`:
+Edit the constants at the top of `claude-say-daemon.sh`:
 
 ```bash
-DEFAULT_VOICE="nova"   # or: shimmer, alloy, echo, fable, onyx
-MODEL="tts-1"          # or: tts-1-hd (higher quality, 2x cost)
+DEFAULT_VOICE="pNInz6obpgDQGcFmaJgB"   # Adam (deep male)
+MODEL="eleven_flash_v2_5"              # or: eleven_turbo_v2_5, eleven_multilingual_v2
+STABILITY="0.45"                       # 0.0 expressive → 1.0 monotone
+SIMILARITY_BOOST="0.75"                # voice fidelity
+STYLE="0.30"                           # expressiveness
 ```
 
-OpenAI voice characteristics:
-- `nova` — warm, friendly female (default). Best balance for LT/EN mixed.
-- `shimmer` — energetic, younger female.
-- `alloy` — neutral, cleanest accent. Slightly robotic.
-- `onyx` — calm, authoritative male baritone.
-- `echo` / `fable` — alternates if you prefer different timbre.
+Common voice IDs (curated, deep masculine matching the original `onyx` vibe):
 
-All voices handle mixed Lithuanian + English in one sentence without language switching. LT pronunciation has a faint American accent — acceptable for short narration sentences.
+| Voice | ID | Character |
+|---|---|---|
+| Adam | `pNInz6obpgDQGcFmaJgB` | deep, narrator-like, energetic (default) |
+| Brian | `nPczCjzI2devNBz1zQrb` | deep, mature, calm |
+| Bill | `pqHfZKP75CvOlQylNhV4` | warm, deep, conversational |
+| George | `JBFqnCBsd6RMkjVDRZzb` | calm, narrative, mature |
+
+Browse the full library: <https://elevenlabs.io/app/voice-library>. Any voice ID from there works.
+
+Model trade-offs:
+- `eleven_flash_v2_5` — fastest (~75ms TTFB), Flash credit rate (50% cost), 32 languages incl. Lithuanian. Default.
+- `eleven_turbo_v2_5` — slightly higher quality, ~250ms latency, full credit rate.
+- `eleven_multilingual_v2` — best quality, slowest, full rate. Use for long-form content.
+
+Lithuanian is forced via `language_code="lt"` when LT diacritics are detected, so the model doesn't auto-detect as Latvian or Polish for short text.
 
 ### Change voice rules / sentence style
 
@@ -166,13 +178,13 @@ Comment out the hook entries in `settings.json` and restart Claude Code. Or run 
 ## Troubleshooting
 
 **Nothing speaks.**
-1. Verify Keychain key: `security find-generic-password -s "claude-voice-openai-api-key" -w` (should print your key)
-2. Verify OpenAI TTS works: `KEY=$(security find-generic-password -s "claude-voice-openai-api-key" -w) && curl -X POST https://api.openai.com/v1/audio/speech -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" -d '{"model":"tts-1","voice":"nova","input":"test"}' -o /tmp/t.mp3 && afplay /tmp/t.mp3`
+1. Verify Keychain key: `security find-generic-password -s "claude-voice-elevenlabs-api-key" -w` (should print your key)
+2. Verify ElevenLabs TTS works: `KEY=$(security find-generic-password -s "claude-voice-elevenlabs-api-key" -w) && curl -X POST "https://api.elevenlabs.io/v1/text-to-speech/pNInz6obpgDQGcFmaJgB?output_format=mp3_44100_128" -H "xi-api-key: $KEY" -H "Content-Type: application/json" -H "Accept: audio/mpeg" -d '{"text":"test","model_id":"eleven_flash_v2_5"}' -o /tmp/t.mp3 && afplay /tmp/t.mp3`
 3. Check hooks are wired: `python3 -c "import json; print(list(json.load(open('$HOME/.claude/settings.json'))['hooks'].keys()))"`
 4. Manually fire: `bash ~/.claude/voice-pipeline/claude-say "test sentence" "" debugsession`
 
 **Voice arrives way too late.**
-The daemon already does parallel pre-synthesis. Remaining latency is the OpenAI API roundtrip (~0.5–1.5s) + the fact that the DONE: hook fires only after the agent's full response is done. If your turns are long, the DONE: arrives only after all tools/text complete — that's by design (it's a *summary*, not a running commentary).
+The daemon already does parallel pre-synthesis. Remaining latency is the ElevenLabs API roundtrip (~75–500ms depending on model) + the fact that the DONE: hook fires only after the agent's full response is done. If your turns are long, the DONE: arrives only after all tools/text complete — that's by design (it's a *summary*, not a running commentary).
 
 **Voice from previous turn plays after I send a new prompt.**
 `UserPromptSubmit` reads `daemon.pid` and kills the daemon plus its children (in-flight `curl` and `afplay`). If you still hear bleed-through, check that the PID file is being written: `ls /tmp/claude-say-queue/<session>/daemon.pid`.
@@ -207,7 +219,7 @@ The next `claude-say` call will respawn a fresh daemon.
 ## Caveats / known limitations
 
 - **macOS only** (`afplay`, `security` for Keychain). Linux port would need an alternate audio player and key store (`secret-tool`/libsecret).
-- **OpenAI dependency** — sentences are sent to OpenAI's API. OpenAI's privacy policy applies (they don't train on API data by default, and offer a DPA for enterprise). Don't enable this pipeline if your conversation sentences cannot leave your machine.
-- **Cost** — `tts-1` is $15/1M characters. Plan + DONE: sentences average ~50 chars each, so ~$0.0015 per Claude turn. A heavy day of 200 turns ≈ $0.30.
-- **No streaming** — each sentence is synthesized to a full MP3 before playback starts. ~0.5s minimum latency per sentence.
-- **Lithuanian accent** — OpenAI's TTS speaks Lithuanian with a faint American accent. Fine for short narration; not suitable for long-form content.
+- **ElevenLabs dependency** — sentences are sent to ElevenLabs' API. Their privacy terms apply (no training on API audio by default, DPA available for enterprise). Don't enable this pipeline if your conversation sentences cannot leave your machine.
+- **Cost** — `eleven_flash_v2_5` runs at the Flash credit rate (50% of standard). On the Creator plan (~$22/mo, 100k chars standard = 200k Flash chars), Plan + DONE: sentences averaging ~50 chars each = ~$0.011 per turn. A heavy day of 200 turns ≈ $2.20. Roughly 5–10× pricier than OpenAI `tts-1`, paid for in voice quality.
+- **No streaming** — each sentence is synthesized to a full MP3 before playback starts. ~75–500ms minimum latency per sentence depending on model.
+- **Lithuanian quality** — ElevenLabs `eleven_flash_v2_5` handles Lithuanian natively (forced via `language_code="lt"`). Much better LT pronunciation than OpenAI; native-grade for short narration.
