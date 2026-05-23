@@ -23,6 +23,39 @@ except:
     pass
 " 2>/dev/null)
 
+LOG_FILE_EARLY="$HOME/.claude/voice-pipeline/voice.log"
+log_event_early() {
+  printf '%s [%s] %s %s\n' "$(date '+%Y-%m-%d %H:%M:%S.%3N')" "${SESSION:0:8}" "$1" "${2:-}" >> "$LOG_FILE_EARLY" 2>/dev/null
+}
+
+# Wait for a NEW assistant message to appear in the transcript before reading.
+# Race: Stop hook can fire before Claude Code flushes the just-finished turn to
+# the JSONL. State-tracked polling solves this without arbitrary sleeps:
+# - we remember the assistant line count seen in the previous invocation
+# - we wait, up to 2s, for that count to grow by at least one
+# - as soon as a new line is present we proceed; if the deadline hits we proceed anyway
+SEEN_DIR="$HOME/.claude/voice-pipeline/state"
+mkdir -p "$SEEN_DIR" 2>/dev/null
+SEEN_FILE="$SEEN_DIR/seen-${SESSION}.txt"
+LAST_SEEN=$(cat "$SEEN_FILE" 2>/dev/null || echo 0)
+DEADLINE_MS=$(($(date +%s%3N) + 2000))
+FRESH=0
+if [ -n "$TRANSCRIPT" ] && [ -f "$TRANSCRIPT" ]; then
+  while [ "$(date +%s%3N)" -lt "$DEADLINE_MS" ]; do
+    COUNT=$(grep -c '"type":"assistant"' "$TRANSCRIPT" 2>/dev/null || echo 0)
+    if [ "$COUNT" -gt "$LAST_SEEN" ]; then
+      echo "$COUNT" > "$SEEN_FILE"
+      FRESH=1
+      log_event_early "poll-fresh" "count=$COUNT prev=$LAST_SEEN"
+      break
+    fi
+    sleep 0.05
+  done
+  if [ "$FRESH" -eq 0 ]; then
+    log_event_early "poll-timeout" "count_unchanged=$LAST_SEEN"
+  fi
+fi
+
 TEXT=""
 if [ -n "$TRANSCRIPT" ] && [ -f "$TRANSCRIPT" ]; then
   TEXT=$(grep '"type":"assistant"' "$TRANSCRIPT" | python3 -c "
@@ -82,7 +115,17 @@ for line in reversed(list(sys.stdin)):
 " 2>/dev/null)
 fi
 
-# No DONE: line → stay silent. The agent decides whether this turn deserves voice.
-[ -z "$TEXT" ] && exit 0
+LOG_FILE="$HOME/.claude/voice-pipeline/voice.log"
+log_event() {
+  printf '%s [%s] %s %s\n' "$(date '+%Y-%m-%d %H:%M:%S.%3N')" "${SESSION:0:8}" "$1" "${2:-}" >> "$LOG_FILE" 2>/dev/null
+}
 
+# No DONE: line → stay silent. The agent decides whether this turn deserves voice.
+if [ -z "$TEXT" ]; then
+  log_event "stop-hook" "silent (no DONE/SAY)"
+  exit 0
+fi
+
+CHAR_COUNT=${#TEXT}
+log_event "stop-hook" "extracted chars=$CHAR_COUNT preview=\"${TEXT:0:60}\""
 bash ~/.claude/voice-pipeline/claude-say "$TEXT" "" "$SESSION"

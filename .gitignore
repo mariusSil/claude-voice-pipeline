@@ -1,1 +1,10 @@
-# nothing yet
+# Runtime artifacts that may leak conversation content or local paths.
+voice.log
+state/
+*.bak
+
+# Compiled helpers (platform-specific, regenerate locally)
+option-state
+
+# macOS junk
+.DS_Store

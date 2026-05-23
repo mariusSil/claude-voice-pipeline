@@ -16,9 +16,15 @@ LOCKDIR="$QUEUE_DIR/daemon.lock"
 
 mkdir -p "$MESSAGES_DIR"
 
+LOG_FILE="$HOME/.claude/voice-pipeline/voice.log"
+log_event() {
+  printf '%s [%s] %s %s\n' "$(date '+%Y-%m-%d %H:%M:%S.%3N')" "${SESSION:0:8}" "$1" "${2:-}" >> "$LOG_FILE" 2>/dev/null
+}
+
 # Filename: <microsecond_ts>__<voice_override_or_empty>.msg
 TS=$(python3 -c 'import time; print(int(time.time()*1000000))')
 printf '%s' "$TEXT" > "$MESSAGES_DIR/${TS}__${VOICE_OVERRIDE}.msg"
+log_event "queued" "ts=$TS chars=${#TEXT}"
 
 # Start daemon for this session if not already running.
 if [ -d "$LOCKDIR" ]; then
@@ -27,6 +33,7 @@ if [ -d "$LOCKDIR" ]; then
 fi
 
 if mkdir "$LOCKDIR" 2>/dev/null; then
+  log_event "daemon-start" ""
   ( bash ~/.claude/voice-pipeline/claude-say-daemon.sh "$QUEUE_DIR" </dev/null >/dev/null 2>&1 & )
 fi
 

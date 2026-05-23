@@ -15,30 +15,40 @@ except:
 QUEUE_DIR="/tmp/claude-say-queue/$SESSION"
 
 # Recursive bottom-up kill — handles grandchildren (curl spawned inside subshell).
+# Two-phase: SIGTERM first so the daemon's `on_exit` trap can run and stop
+# in-flight ffplay/curl cleanly; then SIGKILL anything still alive.
 kill_tree() {
-  local pid=$1
+  local sig=$1 pid=$2
   for child in $(pgrep -P "$pid" 2>/dev/null); do
-    kill_tree "$child"
+    kill_tree "$sig" "$child"
   done
-  kill -KILL "$pid" 2>/dev/null
+  kill -"$sig" "$pid" 2>/dev/null
 }
 
 # 1. Kill any daemon for this session by recorded PID.
 PIDFILE="$QUEUE_DIR/daemon.pid"
 if [ -f "$PIDFILE" ]; then
   DAEMON_PID=$(cat "$PIDFILE" 2>/dev/null)
-  [ -n "$DAEMON_PID" ] && kill_tree "$DAEMON_PID"
+  if [ -n "$DAEMON_PID" ]; then
+    kill_tree TERM "$DAEMON_PID"
+    # Give trap a brief window to cascade SIGTERM to curl/ffplay.
+    sleep 0.15
+    kill_tree KILL "$DAEMON_PID"
+  fi
 fi
 
 # 2. Belt-and-braces: catch any daemon for this session even if pidfile was missing
 #    (e.g. claude-say in mid-spawn). Match by queue dir path in cmdline.
 for pid in $(pgrep -f "claude-say-daemon.sh.*$QUEUE_DIR" 2>/dev/null); do
-  kill_tree "$pid"
+  kill_tree KILL "$pid"
 done
 
-# 3. Catch any stray afplay/curl bearing this session's identifier
+# 3. Catch any stray players/curl bearing this session's identifier
 #    (in case grandchildren got reparented to launchd before the tree kill).
-#    afplay matched via its audio filename arg; curl matched via session-tagged User-Agent.
+#    ffplay/afplay are renamed via `exec -a` to embed the session ID in argv[0];
+#    curl is matched via its session-tagged User-Agent.
+pkill -KILL -f "ffplay-claude-say-${SESSION}" 2>/dev/null
+pkill -KILL -f "afplay-claude-say-${SESSION}" 2>/dev/null
 pkill -KILL -f "claude-say-audio-${SESSION}-" 2>/dev/null
 pkill -KILL -f "claude-say/${SESSION}" 2>/dev/null
 

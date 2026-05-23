@@ -47,8 +47,14 @@ SIMILARITY_BOOST="0.85"    # 0.0-1.0, voice fidelity - push deep timbre
 STYLE="0.30"               # moderate expressiveness, narrator warmth
 PLAYBACK_VOLUME="0.7"
 
+LOG_FILE="$HOME/.claude/voice-pipeline/voice.log"
+log_event() {
+  printf '%s [%s] %s %s\n' "$(date '+%Y-%m-%d %H:%M:%S.%3N')" "${SESSION_ID:0:8}" "$1" "${2:-}" >> "$LOG_FILE" 2>/dev/null
+}
+
 # Write our PID for the kill-on-new-prompt hook.
 echo $$ > "$PIDFILE"
+log_event "daemon-up" "pid=$$"
 
 # Aggressively kill all our descendants on exit so UserPromptSubmit-triggered
 # SIGTERM cleanly stops in-flight curl and afplay.
@@ -73,6 +79,36 @@ trap 'on_exit; exit 0' EXIT TERM INT HUP
 # Retrieve API key once at startup.
 ELEVEN_KEY=$(security find-generic-password -s "claude-voice-elevenlabs-api-key" -w 2>/dev/null)
 [ -z "$ELEVEN_KEY" ] && exit 0
+
+# Push-to-mute via Option key. The Swift helper queries the system-wide
+# modifier state via CGEventSource (no focus needed). We compile it once
+# and cache the binary; subsequent invocations run in ~30ms.
+OPT_BIN="$HOME/.claude/voice-pipeline/option-state"
+OPT_SRC="$HOME/.claude/voice-pipeline/option-state.swift"
+if [ ! -x "$OPT_BIN" ] && [ -f "$OPT_SRC" ] && command -v swiftc >/dev/null 2>&1; then
+  swiftc "$OPT_SRC" -o "$OPT_BIN" 2>/dev/null
+fi
+
+is_option_held() {
+  [ -x "$OPT_BIN" ] || return 1
+  [ "$("$OPT_BIN" 2>/dev/null)" = "1" ]
+}
+
+# Wait while Option is held, up to MAX_HOLD seconds. Returns 0 always
+# (we don't drop messages on long holds — the user explicitly chose to pause).
+wait_until_option_released() {
+  local waited_ms=0
+  local max_ms=60000
+  while is_option_held; do
+    sleep 0.1
+    waited_ms=$((waited_ms + 100))
+    if [ "$waited_ms" -ge "$max_ms" ]; then
+      log_event "option-hold-cap" "waited_ms=$waited_ms"
+      break
+    fi
+  done
+  [ "$waited_ms" -gt 0 ] && log_event "option-released" "waited_ms=$waited_ms"
+}
 
 shopt -s nullglob
 
@@ -118,7 +154,9 @@ print(json.dumps({
 " "$text" "$MODEL" "$lang_code" "$STABILITY" "$SIMILARITY_BOOST" "$STYLE")
 
   if [ "$HAVE_FFPLAY" -eq 1 ]; then
-    # curl -> ffplay pipe. Both die together on SIGTERM via process tree walk.
+    # curl -> ffplay pipe. ffplay is renamed via `exec -a` so the session ID
+    # appears in its argv[0]; this lets UserPromptSubmit's pkill -f catch it
+    # even after launchd reparents it when the daemon dies via SIGKILL.
     printf 'header = "xi-api-key: %s"\n' "$ELEVEN_KEY" | \
     curl -K - -sS --fail-with-body --max-time 25 \
       -A "claude-say/${SESSION_ID}" \
@@ -126,7 +164,7 @@ print(json.dumps({
       -H "Accept: audio/mpeg" \
       -H "Content-Type: application/json" \
       -d "$payload" 2>/dev/null | \
-    ffplay -nodisp -autoexit -loglevel quiet -volume "$FFPLAY_VOLUME" -i - >/dev/null 2>&1
+    ( exec -a "ffplay-claude-say-${SESSION_ID}" ffplay -nodisp -autoexit -loglevel quiet -volume "$FFPLAY_VOLUME" -i - >/dev/null 2>&1 )
   else
     local out="/tmp/claude-say-audio-${SESSION_ID}-$$-$RANDOM.mp3"
     printf 'header = "xi-api-key: %s"\n' "$ELEVEN_KEY" | \
@@ -138,7 +176,7 @@ print(json.dumps({
       -H "Content-Type: application/json" \
       -d "$payload" >/dev/null 2>&1
     if [ -s "$out" ] && file "$out" 2>/dev/null | grep -q 'MPEG\|Audio'; then
-      afplay -v "$PLAYBACK_VOLUME" "$out" 2>/dev/null
+      ( exec -a "afplay-claude-say-${SESSION_ID}" afplay -v "$PLAYBACK_VOLUME" "$out" 2>/dev/null )
     fi
     rm -f "$out"
   fi
@@ -164,6 +202,11 @@ while true; do
     rm -f "$f"
     [ -z "$TEXT" ] && continue
 
+    wait_until_option_released
+    log_event "tts-start" "chars=${#TEXT} voice=$VOICE"
+    T0=$(python3 -c 'import time; print(int(time.time()*1000))')
     synth_and_play_stream "$TEXT" "$VOICE"
+    T1=$(python3 -c 'import time; print(int(time.time()*1000))')
+    log_event "tts-end" "dur_ms=$((T1-T0))"
   done
 done
