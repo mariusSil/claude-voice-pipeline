@@ -44,7 +44,7 @@ esac
 printf '%s' "$NEW" > "$STATE_FILE"
 [ "$NEW" = "off" ] && silence_now
 
-printf '%s [%s] %s %s\n' "$(date '+%Y-%m-%d %H:%M:%S.%3N')" "voicetoggle" "state-set" "$CUR -> $NEW" \
+printf '%s [%s] %s %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "voicetoggle" "state-set" "$CUR -> $NEW" \
   >> "$LOG_FILE" 2>/dev/null
 
 if [ "$NEW" = "on" ]; then

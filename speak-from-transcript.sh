@@ -25,7 +25,7 @@ except:
 
 LOG_FILE_EARLY="$HOME/.claude/voice-pipeline/voice.log"
 log_event_early() {
-  printf '%s [%s] %s %s\n' "$(date '+%Y-%m-%d %H:%M:%S.%3N')" "${SESSION:0:8}" "$1" "${2:-}" >> "$LOG_FILE_EARLY" 2>/dev/null
+  printf '%s [%s] %s %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "${SESSION:0:8}" "$1" "${2:-}" >> "$LOG_FILE_EARLY" 2>/dev/null
 }
 
 # Wait for a NEW assistant message to appear in the transcript before reading.
@@ -38,10 +38,10 @@ SEEN_DIR="$HOME/.claude/voice-pipeline/state"
 mkdir -p "$SEEN_DIR" 2>/dev/null
 SEEN_FILE="$SEEN_DIR/seen-${SESSION}.txt"
 LAST_SEEN=$(cat "$SEEN_FILE" 2>/dev/null || echo 0)
-DEADLINE_MS=$(($(date +%s%3N) + 2000))
+SECONDS=0
 FRESH=0
 if [ -n "$TRANSCRIPT" ] && [ -f "$TRANSCRIPT" ]; then
-  while [ "$(date +%s%3N)" -lt "$DEADLINE_MS" ]; do
+  while [ "$SECONDS" -lt 2 ]; do
     COUNT=$(grep -c '"type":"assistant"' "$TRANSCRIPT" 2>/dev/null || echo 0)
     if [ "$COUNT" -gt "$LAST_SEEN" ]; then
       echo "$COUNT" > "$SEEN_FILE"
@@ -117,7 +117,7 @@ fi
 
 LOG_FILE="$HOME/.claude/voice-pipeline/voice.log"
 log_event() {
-  printf '%s [%s] %s %s\n' "$(date '+%Y-%m-%d %H:%M:%S.%3N')" "${SESSION:0:8}" "$1" "${2:-}" >> "$LOG_FILE" 2>/dev/null
+  printf '%s [%s] %s %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "${SESSION:0:8}" "$1" "${2:-}" >> "$LOG_FILE" 2>/dev/null
 }
 
 # No DONE: line → stay silent. The agent decides whether this turn deserves voice.

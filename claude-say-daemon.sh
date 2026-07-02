@@ -5,7 +5,7 @@
 #
 # Arg 1: queue dir (contains messages/ and daemon.lock).
 #
-# Google Cloud Text-to-Speech, Chirp 3 HD (replaced ElevenLabs 2026-06-02):
+# Google Cloud Text-to-Speech, Chirp 3 HD:
 #   - Chirp 3 HD lt-LT are natural neural voices; the free tier (~1M chars/mo)
 #     covers our ~210k/mo ≈ €0.
 #   - The voice NAME carries the language (lt-LT-...), so languageCode is
@@ -13,8 +13,10 @@
 #   - Chirp 3 HD does NOT support pitch, so we deepen locally with ffmpeg
 #     (DEEPEN_FACTOR < 1.0 = deeper/lower).
 #
-# Auth: Application Default Credentials via `gcloud auth print-access-token`.
-# If gcloud isn't authed, the daemon stays silent.
+# Auth follows the same Google/Gemini credential mapping used elsewhere:
+# GOOGLE_ACCESS_TOKEN, then active `gcloud auth print-access-token`, then ADC.
+# Project comes from GOOGLE_CLOUD_PROJECT / GCP_PROJECT / CLOUDSDK_CORE_PROJECT,
+# falling back to `gcloud config get-value project`. No hardcoded account.
 
 QUEUE_DIR="${1:?queue dir required}"
 MESSAGES_DIR="$QUEUE_DIR/messages"
@@ -25,15 +27,21 @@ SESSION_ID=$(basename "$QUEUE_DIR")
 # lt-LT voice list: curl .../v1/voices?languageCode=lt-LT
 #   Deep male: Enceladus, Algenib, Alnilam, Schedar, Charon
 #   Female:    Aoede, Kore, Leda, Sulafat
-GOOGLE_PROJECT="silotech-workspace"
-TTS_ENDPOINT="https://texttospeech.googleapis.com/v1/text:synthesize"
-DEFAULT_VOICE="lt-LT-Chirp3-HD-Enceladus"   # deep male
-DEEPEN_FACTOR="0.85"        # <1.0 = deeper (ffmpeg pitch shift); 0.82-0.88 sweet spot
-PLAYBACK_VOLUME="0.7"
+GOOGLE_PROJECT="${GOOGLE_CLOUD_PROJECT:-${GCP_PROJECT:-${CLOUDSDK_CORE_PROJECT:-}}}"
+if [ -z "$GOOGLE_PROJECT" ] && command -v gcloud >/dev/null 2>&1; then
+  GCLOUD_PROJECT=$(gcloud config get-value project 2>/dev/null || true)
+  if [ -n "$GCLOUD_PROJECT" ] && [ "$GCLOUD_PROJECT" != "(unset)" ]; then
+    GOOGLE_PROJECT="$GCLOUD_PROJECT"
+  fi
+fi
+TTS_ENDPOINT="${GOOGLE_TTS_ENDPOINT:-https://texttospeech.googleapis.com/v1/text:synthesize}"
+DEFAULT_VOICE="${GOOGLE_TTS_VOICE:-lt-LT-Chirp3-HD-Enceladus}"   # deep male
+DEEPEN_FACTOR="${GOOGLE_TTS_DEEPEN_FACTOR:-0.85}"                # <1.0 = deeper
+PLAYBACK_VOLUME="${GOOGLE_TTS_PLAYBACK_VOLUME:-0.7}"
 
 LOG_FILE="$HOME/.claude/voice-pipeline/voice.log"
 log_event() {
-  printf '%s [%s] %s %s\n' "$(date '+%Y-%m-%d %H:%M:%S.%3N')" "${SESSION_ID:0:8}" "$1" "${2:-}" >> "$LOG_FILE" 2>/dev/null
+  printf '%s [%s] %s %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "${SESSION_ID:0:8}" "$1" "${2:-}" >> "$LOG_FILE" 2>/dev/null
 }
 
 # Write our PID for the kill-on-new-prompt hook.
@@ -66,13 +74,40 @@ on_exit() {
 }
 trap 'on_exit; exit 0' EXIT TERM INT HUP
 
-# Auth: Google access token via gcloud (ADC). Daemon is short-lived (spawned per
-# message batch, exits when queue drains), so a token fetched once at startup is
-# valid for its whole life. If gcloud isn't authed, stay silent.
-# Pinned to silo@silotech.xyz (the account with TTS access to project
-# silotech-workspace) so voice works regardless of which gcloud account is active.
-GTOKEN=$(gcloud auth print-access-token --account=silo@silotech.xyz 2>/dev/null)
-[ -z "$GTOKEN" ] && exit 0
+resolve_google_access_token() {
+  if [ -n "${GOOGLE_ACCESS_TOKEN:-}" ]; then
+    printf '%s' "$GOOGLE_ACCESS_TOKEN"
+    return 0
+  fi
+
+  command -v gcloud >/dev/null 2>&1 || return 1
+
+  local token
+  token=$(gcloud auth print-access-token 2>/dev/null || true)
+  if [ -n "$token" ]; then
+    printf '%s' "$token"
+    return 0
+  fi
+
+  token=$(gcloud auth application-default print-access-token 2>/dev/null || true)
+  if [ -n "$token" ]; then
+    printf '%s' "$token"
+    return 0
+  fi
+
+  return 1
+}
+
+if [ -z "$GOOGLE_PROJECT" ]; then
+  log_event "auth-missing" "missing GOOGLE_CLOUD_PROJECT/GCP_PROJECT and no gcloud project"
+  exit 0
+fi
+
+GTOKEN=$(resolve_google_access_token)
+if [ -z "$GTOKEN" ]; then
+  log_event "auth-missing" "no GOOGLE_ACCESS_TOKEN, gcloud user token, or ADC token"
+  exit 0
+fi
 
 # Push-to-mute via Option key. The Swift helper queries the system-wide
 # modifier state via CGEventSource (no focus needed). We compile it once
