@@ -1,5 +1,6 @@
 # Runtime artifacts that may leak conversation content or local paths.
 voice.log
+voice.state
 state/
 *.bak
 

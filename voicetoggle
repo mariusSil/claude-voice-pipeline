@@ -1,0 +1,54 @@
+#!/bin/bash
+# Global voice on/off switch for the Claude voice pipeline.
+# Reads/writes a single state file that `claude-say` checks before queueing TTS.
+# Works from any terminal, any directory, any Claude session.
+#
+# Usage:
+#   voicetoggle           flip current state (on<->off)
+#   voicetoggle on        force on
+#   voicetoggle off       force off (also silences any in-flight audio NOW)
+#   voicetoggle status    print current state, no change
+#
+# Default (no state file) = ON.
+
+STATE_FILE="$HOME/.claude/voice-pipeline/voice.state"
+LOG_FILE="$HOME/.claude/voice-pipeline/voice.log"
+
+current() {
+  if [ "$(cat "$STATE_FILE" 2>/dev/null)" = "off" ]; then echo "off"; else echo "on"; fi
+}
+
+# Hard-stop every running daemon/player across ALL sessions. Used when turning
+# off so a sentence already mid-flight is cut immediately, not just future ones.
+silence_now() {
+  pkill -KILL -f "claude-say-daemon.sh" 2>/dev/null
+  pkill -KILL -f "ffplay-claude-say-"   2>/dev/null
+  pkill -KILL -f "afplay-claude-say-"   2>/dev/null
+  pkill -KILL -f "claude-say-audio-"    2>/dev/null
+  rm -rf /tmp/claude-say-queue/*/daemon.lock 2>/dev/null
+}
+
+CUR=$(current)
+case "${1:-toggle}" in
+  on)      NEW="on" ;;
+  off)     NEW="off" ;;
+  toggle)  [ "$CUR" = "on" ] && NEW="off" || NEW="on" ;;
+  status|--status|-s)
+    echo "🔊 voice: $CUR"
+    exit 0 ;;
+  *)
+    echo "usage: voicetoggle [on|off|status]   (no arg = toggle)" >&2
+    exit 2 ;;
+esac
+
+printf '%s' "$NEW" > "$STATE_FILE"
+[ "$NEW" = "off" ] && silence_now
+
+printf '%s [%s] %s %s\n' "$(date '+%Y-%m-%d %H:%M:%S.%3N')" "voicetoggle" "state-set" "$CUR -> $NEW" \
+  >> "$LOG_FILE" 2>/dev/null
+
+if [ "$NEW" = "on" ]; then
+  echo "🔊 voice ON"
+else
+  echo "🔇 voice OFF"
+fi

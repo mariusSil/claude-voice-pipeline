@@ -9,10 +9,21 @@ SESSION="${3:-${CLAUDE_SESSION_ID:-default}}"
 
 [ -z "$TEXT" ] && exit 0
 
+# Global voice on/off switch. Single choke point: every TTS request flows through
+# here, so one flag silences all sessions. Missing file = enabled (fail-on).
+# Toggle from anywhere with the `voicetoggle` terminal command.
+VOICE_STATE_FILE="$HOME/.claude/voice-pipeline/voice.state"
+if [ "$(cat "$VOICE_STATE_FILE" 2>/dev/null)" = "off" ]; then
+  printf '%s [%s] %s %s\n' "$(date '+%Y-%m-%d %H:%M:%S.%3N')" "${3:-default}" "muted" "(voice off, dropped chars=${#TEXT})" \
+    >> "$HOME/.claude/voice-pipeline/voice.log" 2>/dev/null
+  exit 0
+fi
+
 QUEUE_ROOT="/tmp/claude-say-queue"
 QUEUE_DIR="$QUEUE_ROOT/$SESSION"
 MESSAGES_DIR="$QUEUE_DIR/messages"
 LOCKDIR="$QUEUE_DIR/daemon.lock"
+PIDFILE="$QUEUE_DIR/daemon.pid"
 
 mkdir -p "$MESSAGES_DIR"
 
@@ -27,9 +38,22 @@ printf '%s' "$TEXT" > "$MESSAGES_DIR/${TS}__${VOICE_OVERRIDE}.msg"
 log_event "queued" "ts=$TS chars=${#TEXT}"
 
 # Start daemon for this session if not already running.
+# Liveness is determined by the daemon's PID, not lockdir age. A slow ElevenLabs
+# curl (--max-time 25) can legitimately exceed any short age threshold, so we
+# only consider the lock stale when the recorded PID is no longer alive.
 if [ -d "$LOCKDIR" ]; then
-  age=$(($(date +%s) - $(stat -f %m "$LOCKDIR" 2>/dev/null || echo 0)))
-  [ "$age" -gt 15 ] && rm -rf "$LOCKDIR"
+  alive=0
+  if [ -f "$PIDFILE" ]; then
+    pid=$(cat "$PIDFILE" 2>/dev/null)
+    if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+      alive=1
+    fi
+  fi
+  if [ "$alive" -eq 0 ]; then
+    log_event "lock-stale-cleanup" "pidfile=$(cat "$PIDFILE" 2>/dev/null)"
+    rm -rf "$LOCKDIR"
+    rm -f "$PIDFILE"
+  fi
 fi
 
 if mkdir "$LOCKDIR" 2>/dev/null; then
