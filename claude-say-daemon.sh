@@ -34,10 +34,23 @@ if [ -z "$GOOGLE_PROJECT" ] && command -v gcloud >/dev/null 2>&1; then
     GOOGLE_PROJECT="$GCLOUD_PROJECT"
   fi
 fi
+# Paskutinė atrama: projektas iš servisinės paskyros rakto, kad demonas
+# nenumirtų vien todėl, kad gcloud nesukonfigūruotas.
+if [ -z "$GOOGLE_PROJECT" ]; then
+  _sa_key="${GOOGLE_TTS_SA_KEY:-$HOME/.config/silo/transcriber-sa.json}"
+  [ -r "$_sa_key" ] && GOOGLE_PROJECT=$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1])).get("project_id",""))' "$_sa_key" 2>/dev/null || true)
+fi
 TTS_ENDPOINT="${GOOGLE_TTS_ENDPOINT:-https://texttospeech.googleapis.com/v1/text:synthesize}"
 DEFAULT_VOICE="${GOOGLE_TTS_VOICE:-lt-LT-Chirp3-HD-Enceladus}"   # deep male
 DEEPEN_FACTOR="${GOOGLE_TTS_DEEPEN_FACTOR:-0.85}"                # <1.0 = deeper
 PLAYBACK_VOLUME="${GOOGLE_TTS_PLAYBACK_VOLUME:-0.7}"
+GOOGLE_TTS_SPEED="${GOOGLE_TTS_SPEED:-1.2}"                      # >1.0 = faster playback
+# Google Cloud API account for the access token. The machine's active gcloud
+# account (marius personal) lacks serviceusage.services.use on the TTS project,
+# so synth returns 403 and nothing plays. Pin the silo@ account here without
+# changing the global active account (other flows rely on it). Override with
+# GOOGLE_TTS_ACCOUNT; set empty to fall back to whatever gcloud active account is.
+GOOGLE_TTS_ACCOUNT="${GOOGLE_TTS_ACCOUNT-silo@silotech.xyz}"
 
 LOG_FILE="$HOME/.claude/voice-pipeline/voice.log"
 log_event() {
@@ -74,16 +87,59 @@ on_exit() {
 }
 trap 'on_exit; exit 0' EXIT TERM INT HUP
 
+# Servisinės paskyros raktas -> access token, tik openssl + curl, be gcloud.
+# Naudojam pirmiau už gcloud, nes vartotojo OAuth tokenas periodiškai miršta
+# (07-15..07-17 ir 08-01 gedimai: 81 auth-missing, 0 tts-start per dieną).
+SA_KEY="${GOOGLE_TTS_SA_KEY:-$HOME/.config/silo/transcriber-sa.json}"
+
+sa_access_token() {
+  [ -r "$SA_KEY" ] || return 1
+  command -v openssl >/dev/null 2>&1 || return 1
+
+  local b64u='openssl base64 -A | tr "+/" "-_" | tr -d "="'
+  local email token_uri now exp header claims signing sig assertion keyfile resp
+  email=$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["client_email"])' "$SA_KEY" 2>/dev/null) || return 1
+  token_uri=$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["token_uri"])' "$SA_KEY" 2>/dev/null) || return 1
+  now=$(date +%s); exp=$((now + 3600))
+
+  header=$(printf '{"alg":"RS256","typ":"JWT"}' | eval "$b64u")
+  claims=$(printf '{"iss":"%s","scope":"https://www.googleapis.com/auth/cloud-platform","aud":"%s","iat":%s,"exp":%s}' \
+    "$email" "$token_uri" "$now" "$exp" | eval "$b64u")
+  signing="${header}.${claims}"
+
+  keyfile=$(mktemp) || return 1
+  python3 -c 'import json,sys;sys.stdout.write(json.load(open(sys.argv[1]))["private_key"])' "$SA_KEY" > "$keyfile" 2>/dev/null || { rm -f "$keyfile"; return 1; }
+  sig=$(printf '%s' "$signing" | openssl dgst -sha256 -sign "$keyfile" 2>/dev/null | eval "$b64u")
+  rm -f "$keyfile"
+  [ -n "$sig" ] || return 1
+  assertion="${signing}.${sig}"
+
+  resp=$(curl -s --max-time 20 -X POST "$token_uri" \
+    -d 'grant_type=urn:ietf:params:oauth:grant-type:jwt-bearer' \
+    --data-urlencode "assertion=${assertion}" 2>/dev/null) || return 1
+  token=$(printf '%s' "$resp" | python3 -c 'import json,sys;print(json.load(sys.stdin).get("access_token",""))' 2>/dev/null)
+  [ -n "$token" ] || return 1
+  printf '%s' "$token"
+}
+
 resolve_google_access_token() {
   if [ -n "${GOOGLE_ACCESS_TOKEN:-}" ]; then
     printf '%s' "$GOOGLE_ACCESS_TOKEN"
     return 0
   fi
 
+  local sa_tok
+  sa_tok=$(sa_access_token || true)
+  if [ -n "$sa_tok" ]; then
+    printf '%s' "$sa_tok"
+    return 0
+  fi
+
   command -v gcloud >/dev/null 2>&1 || return 1
 
-  local token
-  token=$(gcloud auth print-access-token 2>/dev/null || true)
+  local token acct_arg=""
+  [ -n "$GOOGLE_TTS_ACCOUNT" ] && acct_arg="--account=$GOOGLE_TTS_ACCOUNT"
+  token=$(gcloud auth print-access-token $acct_arg 2>/dev/null || true)
   if [ -n "$token" ]; then
     printf '%s' "$token"
     return 0
@@ -149,8 +205,8 @@ command -v ffmpeg >/dev/null 2>&1 && HAVE_FFMPEG=1
 
 # ffplay -volume is 0-100; PLAYBACK_VOLUME is 0-1.
 FFPLAY_VOLUME=$(python3 -c "print(int(float('$PLAYBACK_VOLUME')*100))")
-# atempo factor that cancels asetrate's slowdown (1/DEEPEN_FACTOR).
-ATEMPO=$(python3 -c "print(1.0/float('$DEEPEN_FACTOR'))")
+# atempo restores tempo after asetrate's slowdown, then scales by GOOGLE_TTS_SPEED (>1 = faster).
+ATEMPO=$(python3 -c "print(float('$GOOGLE_TTS_SPEED')/float('$DEEPEN_FACTOR'))")
 
 synth_and_play() {
   # $1 text, $2 voice name (e.g. lt-LT-Chirp3-HD-Enceladus)
