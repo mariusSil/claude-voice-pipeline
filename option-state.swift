@@ -1,7 +1,12 @@
-// Prints "1" if the Option (Alt) modifier is currently held, "0" otherwise.
-// Uses CGEventSource for system-wide modifier state without focus.
-// Compiled once at daemon startup; per-call cost is ~30ms warm.
+// Prints the system-wide modifier state for the voice daemon (no focus needed):
+//   "2" = Control+Option+Command held: stop all speech now and clear queues
+//   "1" = only Option held: pause before the next sentence (push-to-mute)
+//   "0" = neither
 import CoreGraphics
 
 let flags = CGEventSource.flagsState(.combinedSessionState)
-print(flags.contains(.maskAlternate) ? "1" : "0")
+if flags.contains(.maskControl) && flags.contains(.maskAlternate) && flags.contains(.maskCommand) {
+    print("2")
+} else {
+    print(flags.contains(.maskAlternate) ? "1" : "0")
+}

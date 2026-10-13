@@ -105,3 +105,13 @@ Ignored local files:
 - `state/`
 - `option-state`
 - `*.bak`
+
+## Viena eilė ir sustabdymas
+
+- Visos sesijos (Claude ir Codex) groja po vieną sakinį: sintezė vyksta lygiagrečiai,
+  grojimas laukia bendro užrakto `/tmp/claude-say-play.lock`.
+- Codex frazė prasideda žodžiu „Codex.“ (`codex/speak-from-stop.sh`, diegti į
+  `~/.codex/voice-pipeline/`).
+- Sustabdyti viską dabar: laikyti Control+Option+Command, komanda `voicestop` arba
+  SwiftBar meniu „Tylėk dabar“. Balsas lieka įjungtas kitiems atsakymams.
+- Option laikymas pristabdo prieš kitą sakinį, `voicetoggle off` išjungia visai.

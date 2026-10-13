@@ -80,6 +80,24 @@ rm -f "/tmp/claude-plan-spoken-$SESSION"
 find /tmp -maxdepth 1 -name 'claude-plan-spoken-*' -type f -mtime +7 -delete 2>/dev/null
 find /tmp/claude-say-queue -mindepth 1 -maxdepth 1 -type d -mtime +1 -exec rm -rf {} + 2>/dev/null
 
+# 7. Balso taisyklė: PILNA tik pirmoje sesijos žinutėje, toliau trumpas priminimas.
+#    2026-09-16 matavimas: pilna taisyklė kainavo ~600 žetonų KIEKVIENAI žinutei
+#    (2 KB), per 50 žingsnių sesiją apie 30 tūkst. Priminimas yra ~40 žetonų.
+RULE_FLAG="/tmp/claude-voice-rule-$SESSION"
+find /tmp -maxdepth 1 -name 'claude-voice-rule-*' -type f -mtime +7 -delete 2>/dev/null
+if [ -f "$RULE_FLAG" ]; then
+  cat <<'EOF'
+{
+  "hookSpecificOutput": {
+    "hookEventName": "UserPromptSubmit",
+    "additionalContext": "VOICE RULE (reminder): last line of the final response is ONE sentence starting with 'DONE:' (max 14 words, user's language, first person, written for the ear, no em-dash, say what got done)."
+  }
+}
+EOF
+  exit 0
+fi
+touch "$RULE_FLAG"
+
 cat <<'EOF'
 {
   "hookSpecificOutput": {

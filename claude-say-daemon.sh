@@ -73,6 +73,7 @@ kill_descendants() {
   kill -KILL "$pid" 2>/dev/null
 }
 on_exit() {
+  [ "$(cat /tmp/claude-say-play.lock/pid 2>/dev/null)" = "$$" ] && rm -rf /tmp/claude-say-play.lock
   for kid in $(pgrep -P $$ 2>/dev/null); do
     kill_descendants "$kid"
   done
@@ -174,9 +175,33 @@ if [ ! -x "$OPT_BIN" ] && [ -f "$OPT_SRC" ] && command -v swiftc >/dev/null 2>&1
   swiftc "$OPT_SRC" -o "$OPT_BIN" 2>/dev/null
 fi
 
+modifier_state() {
+  [ -x "$OPT_BIN" ] || { echo 0; return; }
+  "$OPT_BIN" 2>/dev/null || echo 0
+}
+
 is_option_held() {
-  [ -x "$OPT_BIN" ] || return 1
-  [ "$("$OPT_BIN" 2>/dev/null)" = "1" ]
+  [ "$(modifier_state)" = "1" ]
+}
+
+PLAY_LOCK="/tmp/claude-say-play.lock"
+acquire_play_lock() {
+  local waited=0 holder
+  until mkdir "$PLAY_LOCK" 2>/dev/null; do
+    holder=$(cat "$PLAY_LOCK/pid" 2>/dev/null)
+    if [ -n "$holder" ] && ! kill -0 "$holder" 2>/dev/null; then
+      rm -rf "$PLAY_LOCK"; continue
+    fi
+    sleep 0.2; waited=$((waited + 1))
+    # 10 min cap: a stuck lock must not silence everything forever.
+    [ "$waited" -ge 3000 ] && { log_event "play-lock-timeout" ""; rm -rf "$PLAY_LOCK"; }
+  done
+  echo $$ > "$PLAY_LOCK/pid"
+  [ "$waited" -gt 0 ] && log_event "play-lock-waited" "ms=$((waited * 200))"
+  return 0
+}
+release_play_lock() {
+  [ "$(cat "$PLAY_LOCK/pid" 2>/dev/null)" = "$$" ] && rm -rf "$PLAY_LOCK"
 }
 
 # Wait while Option is held, up to MAX_HOLD seconds. Returns 0 always
@@ -260,13 +285,31 @@ except Exception:
     fi
   fi
 
+  # One sentence at a time across ALL sessions (Claude and Codex): synthesis runs
+  # in parallel per session, but playback waits for the global lock, so voices
+  # queue up instead of talking over each other. The lock is a directory with
+  # the holder PID; a dead holder's lock is taken over.
+  acquire_play_lock || { rm -f "$raw" "${base}-deep.mp3"; return 0; }
+
   # Players renamed via `exec -a` so the kill-hook's pkill -f finds them by
   # session id even after launchd reparents them when the daemon dies.
   if [ "$HAVE_FFPLAY" -eq 1 ]; then
-    ( exec -a "ffplay-claude-say-${SESSION_ID}" ffplay -nodisp -autoexit -loglevel quiet -volume "$FFPLAY_VOLUME" -i "$play" >/dev/null 2>&1 )
+    ( exec -a "ffplay-claude-say-${SESSION_ID}" ffplay -nodisp -autoexit -loglevel quiet -volume "$FFPLAY_VOLUME" -i "$play" >/dev/null 2>&1 ) &
   else
-    ( exec -a "afplay-claude-say-${SESSION_ID}" afplay -v "$PLAYBACK_VOLUME" "$play" 2>/dev/null )
+    ( exec -a "afplay-claude-say-${SESSION_ID}" afplay -v "$PLAYBACK_VOLUME" "$play" 2>/dev/null ) &
   fi
+  local player=$!
+  # While playing, Control+Option+Command stops every voice and clears queues.
+  while kill -0 "$player" 2>/dev/null; do
+    if [ "$(modifier_state)" = "2" ]; then
+      log_event "stop-combo" ""
+      bash "$HOME/.claude/voice-pipeline/voicestop"
+      break
+    fi
+    sleep 0.15
+  done
+  wait "$player" 2>/dev/null
+  release_play_lock
 
   rm -f "$raw" "${base}-deep.mp3"
 }

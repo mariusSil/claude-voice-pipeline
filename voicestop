@@ -1,0 +1,12 @@
+#!/bin/bash
+# Stops whatever is being spoken right now in every Claude and Codex session and
+# drops all queued sentences. Voice stays ON for future answers (unlike
+# `voicetoggle off`). Called from the SwiftBar menu and by the daemon when
+# Control+Option+Command is held.
+rm -f /tmp/claude-say-queue/*/messages/*.msg 2>/dev/null
+pkill -KILL -f "ffplay-claude-say-" 2>/dev/null
+pkill -KILL -f "afplay-claude-say-" 2>/dev/null
+rm -rf /tmp/claude-say-play.lock 2>/dev/null
+printf '%s [voicestop] stopped all speech and cleared queues\n' "$(date '+%Y-%m-%d %H:%M:%S')" \
+  >> "$HOME/.claude/voice-pipeline/voice.log" 2>/dev/null
+exit 0
